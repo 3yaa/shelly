@@ -1,0 +1,4 @@
+.vscode/
+your_output
+*.o
+sshell

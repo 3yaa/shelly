@@ -3,15 +3,22 @@
 #include <string.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <stdbool.h>
 /* got Implicit declaration of function ‘wait’... got answer from 
 https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wait*/
 #include <sys/types.h>
 #include <sys/wait.h>
+#include "argvList.h"
+
 //
 #define CMDLINE_MAX 512
 #define NON_NULL_MAX 16
 #define TOKEN_MAX 32
 // #define PIPE_MAX 3
+//
+#define EXIT_STATUS -1
+#define PWD_STATUS 2
+#define CD_STATUS 3
 //
 #define CMDLINE_ERR -4
 #define MAX_ARG_ERR -6
@@ -20,17 +27,31 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 struct Command {
     char cmd[CMDLINE_MAX];
     char *argv[NON_NULL_MAX];
-    char **argvList;
-    size_t argvNum;
-
-
     //
-    char *argv2[NON_NULL_MAX];
-    char *argv3[NON_NULL_MAX];
-    // char *argumentList[MAX_PIPE];
+    int argvNum;
+    ArgvList argvList;
+    ArgvNode *currentArgv;
+    //
+    int numChild;
+    pid_t pidChilds[100];
+    int statusList[100];
 };
 
-int allocateMem(char **argv, int rows, int cols) {
+// void allocateMemStatus(int *arr, int argvNum) {
+//     arr = (int*)calloc(argvNum, sizeof(argvNum));
+//     if (arr == NULL) {
+//         perror("status type shi");
+//     }
+// }
+
+// void freeMemStatus(int *arr, int argvNum) {
+//     if (arr != NULL) {
+//         free(arr);
+//         arr = NULL;
+//     }
+// }
+
+int allocateMemArgv(char *argv[], int rows, int cols) {
     for (int i = 0; i < rows; i++) {
         argv[i] = calloc(cols, sizeof(char));
         if (argv[i] == NULL) {
@@ -44,7 +65,7 @@ int allocateMem(char **argv, int rows, int cols) {
     return 0;
 }
 
-void freeMemory(char **argv, int rows) {
+void freeMemArgv(char **argv, int rows) {
     for (int i = 0; i < rows; i++) {
         if (argv[i]) {
             free(argv[i]);
@@ -53,260 +74,217 @@ void freeMemory(char **argv, int rows) {
     }
 }
 
-int parseCommand(struct Command *cmd) {
+void fixNullEntries(struct Command *cmd) {
     //reinitialize null data
     for (size_t i = 0; i < NON_NULL_MAX; i++) {
         if (cmd->argv[i] == NULL) {
             cmd->argv[i] = calloc(TOKEN_MAX, sizeof(char));
         }
     }
+}
 
+int parseCommand(struct Command *cmd) {
+    fixNullEntries(cmd);
     //parses command into tokens
     size_t i = 0, j = 0, k = 0;
     while (i < CMDLINE_MAX && cmd->cmd[i] != '\0') {
+        //too many arguments
+        if (j >= NON_NULL_MAX-1) return MAX_ARG_ERR;
         //individual token too big
-        if (k >= TOKEN_MAX-1) {
-            return MAX_ARG_SIZE_ERR;
-        }
-        //pipe
-        if (cmd->cmd[i] == '|') {
-            cmd->argv[j][k] = '\0';
-            j++;
-            cmd->argv[j] = "|\0";
-            j++; k = 0;
-        }
+        if (k >= TOKEN_MAX-1) return MAX_ARG_SIZE_ERR;
 
-        //kills white space
-        if (cmd->cmd[i] == ' ') {
-            //too many arguments
-            if (j >= NON_NULL_MAX-1) {
-                return MAX_ARG_ERR;
-            }
-            //kills multi white spaces
-            while (cmd->cmd[i+1] == ' ' && cmd->cmd[i+1] != '\0') {
-                i++;
-            }
-            if (cmd->cmd[i+1] != '\0') i++; //skips the last whitespace
-            if (j == 0 && k == 0) {
-                continue;
-            }
-            cmd->argv[j][k] = '\0'; //ends the argument
-            j++; k = 0; //goes to new argument
-        }
         //kills "" && ''
         if ((cmd->cmd[i] == '\'' || cmd->cmd[i] == '"') && j != 0) {
+            i++; continue;
+        }
+
+        //pipes
+        if (cmd->cmd[i] == '|') {
+            //makes sure theres cmd before pipe
+            if (j == 0 && k == 0 && cmd->argvNum < 1) return -1; 
+            // if need to end current argv
+            if (k > 0) {
+                cmd->argv[j][k] = '\0';
+                j++;
+            }
+            cmd->argv[j] = NULL;
+            cmd->argvNum++;
+            //pushes to list
+            pushArgv(&cmd->argvList, cmd->argv);
+            //
+            fixNullEntries(cmd);
+            j = 0; k = 0; i++;
+            continue;
+        }
+
+        //whitespace
+        if (cmd->cmd[i] == ' ') {
+            //ends argv
+            if (k > 0) {
+                cmd->argv[j][k] = '\0';
+                j++; k = 0;
+            }
+            //kills multi whitespace
+            while (cmd->cmd[i+1] == ' ') i++;
             i++;
             continue;
         }
-        //gets pipe
-        if (cmd->cmd[i] == '|') {
-            cmd->argvNum++;
-        }
+        
+        //puts cmd into argv
         cmd->argv[j][k] = cmd->cmd[i];
         k++; i++; //goes to new token
     }
-    //ends w null termination
+    //ends line and puts NULL
     if (k > 0) {
         cmd->argv[j][k] = '\0';
         cmd->argv[j+1] = NULL;
+        cmd->argvNum++;
     } else if (k == 1) {
         cmd->argv[j] = NULL;
+        cmd->argvNum++;
+    }
+    //puts the argv into the list 
+    if (cmd->argvList.count < cmd->argvNum) {
+        pushArgv(&cmd->argvList, cmd->argv);
+
     }
     return 0;
 }
 
-void separateArgvs(struct Command *cmd) {
-    if (cmd->argvNum <= 1) return;
-    //
-    size_t counter = 1, argvC_2 = 0, argvC_3 = 0; int i = 0;
-    for (; cmd->argv[i] != NULL; i++) {
-        //first command
-        if (counter == 1) {
-            if (*cmd->argv[i] == '|') {
-                cmd->argv[i] = NULL;
-                counter++;
-            }
-            continue;
-        }
-        //second command
-        if (counter == 2) {
-            if (*cmd->argv[i] == '|') {
-                cmd->argv2[argvC_2] = NULL;
-                counter++;
-                continue;
-            }
-            cmd->argv2[argvC_2] = cmd->argv[i];
-            argvC_2++;
-            continue;
-        }
-        //third command
-        if (counter == 3) {
-            cmd->argv3[argvC_3] = cmd->argv[i];
-            argvC_3++; 
-        }
+//build in cmd that doesn't need any parsing
+int builtInCmd(struct Command *cmd) {
+    //EXIT
+    if (!strcmp(cmd->cmd, "exit")) {
+        fprintf(stderr, "Bye...\n");
+        fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd); //need exit val
+        return EXIT_STATUS;
     }
-    if (counter >= 2) {
-        cmd->argv2[argvC_2] = NULL;
+
+    //PWD
+    if (!strcmp(cmd->cmd, "pwd")) {
+        char pwd[1000];
+        fprintf(stdout, "%s\n", getcwd(pwd, sizeof(pwd)));
+        fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
+        return PWD_STATUS;
     }
-    if (counter >= 3) {
-        cmd->argv3[argvC_3] = NULL;
-    }
+    return 0;
 }
 
-void forkNExec(struct Command *cmd, size_t i) {
-    if(i >= cmd->argvNum) return;
+//build in cmd that needs the cmd to be parsed first
+int builtInCmd2(struct Command *cmd) {
+    //CD
+    if (!strcmp(cmd->argv[0], "cd")) {
+        chdir(cmd->argv[1]); //changes the directory
+        fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
+        return CD_STATUS;
+    }
+    return 0;
+}
 
-    // char** args_list[3] = {cmd->arguments, cmd->argument2, cmd->argument3};
-    // char** args = args_list[i];
+void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd) {
+    //base case
+    if (cmd->currentArgv == NULL) return;
 
-    pid_t pid1, pid2, pid3;
-    int pipe1_fd[2];
-    int pipe2_fd[2];
+    //set up
+    int pipe_fd[2]; bool pipeCreated = false;
+
+    ///basically checks if it has a next argument (pipe) to write to
+    bool writingNext = cmd->currentArgv->next != NULL;
+
+    //create a pipe when writing to next pipe
+    if (writingNext){ 
+        if (pipe(pipe_fd) < 0) { //pipe creation fail
+            perror("pipe failed"); //idk can change the message
+            return;
+        }
+        pipeCreated = true;
+    }
 
     //
-    if (cmd->argvNum > 1) pipe(pipe1_fd);
-    if (cmd->argvNum > 2) pipe(pipe2_fd);
-
-    // First command
-    pid1 = fork();
-    if (pid1 == 0) {
-        if (cmd->argvNum > 1) {
-            close(pipe1_fd[0]);
-            dup2(pipe1_fd[1], STDOUT_FILENO);
-            close(pipe1_fd[1]);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork failed");
+        if (pipeCreated) {
+            close(pipe_fd[0]);
+            close(pipe_fd[1]);
         }
-        execvp(cmd->argv[0], cmd->argv);
+        return;
+    }
+
+    if (pid == 0){ //child
+        //read from past pipe
+        if (readingPrev) {
+            dup2(prevPipeReadEnd, STDIN_FILENO); //hook up stdin to prev_pipe_read
+            close(prevPipeReadEnd); //close prev_pipe_read
+        }
+        //write to new pipe
+        if (writingNext) {
+            close(pipe_fd[0]); //close pipe_read
+            dup2(pipe_fd[1], STDOUT_FILENO); //hook up pipe_write to stdout
+            close(pipe_fd[1]); //close pipe_write
+        }
+        execvp(cmd->currentArgv->argv[0], cmd->currentArgv->argv);
         fprintf(stderr, "Error: command not found\n");
         exit(1);
     }
 
-    // Second command (if exists)
-    if (cmd->argvNum >= 2) {
-        pid2 = fork();
-        if (pid2 == 0) {
-            // Set up input from previous pipe
-            close(pipe1_fd[1]);
-            dup2(pipe1_fd[0], STDIN_FILENO);
-            close(pipe1_fd[0]);
-            
-            // Set up output to next pipe if needed
-            if (cmd->argvNum > 2) {
-                close(pipe2_fd[0]);
-                dup2(pipe2_fd[1], STDOUT_FILENO);
-                close(pipe2_fd[1]);
-            }
-            
-            execvp(cmd->argv2[0], cmd->argv2);
-            fprintf(stderr, "Error: command not found\n");
-            exit(1);
-        }
-        // Parent closes pipe ends it won't use
-        close(pipe1_fd[0]);
-        close(pipe1_fd[1]);
-    }
+                 //parent
 
-    // Third command (if exists)
-    if (cmd->argvNum > 2) {
-        pid3 = fork();
-        if (pid3 == 0) {
-            close(pipe2_fd[1]);
-            dup2(pipe2_fd[0], STDIN_FILENO);
-            close(pipe2_fd[0]);
-            
-            execvp(cmd->argv3[0], cmd->argv3);
-            fprintf(stderr, "Error: command not found\n");
-            exit(1);
-        }
-        // Parent closes pipe ends it won't use
-        close(pipe2_fd[0]);
-        close(pipe2_fd[1]);
-    }
+    cmd->pidChilds[cmd->numChild++] = pid;
 
-    // Wait for all children to complete
-    int status1, status2, status3;
-    if (cmd->argvNum >= 3) {
-        waitpid(pid3, &status3, 0);
-        waitpid(pid2, &status2, 0);
-        waitpid(pid1, &status1, 0);
-        fprintf(stderr, "+ completed '%s' [%d][%d][%d]\n", cmd->cmd, 
-            WEXITSTATUS(status1), WEXITSTATUS(status2), WEXITSTATUS(status3));
-    } else if (cmd->argvNum == 2) {
-        waitpid(pid2, &status2, 0);
-        waitpid(pid1, &status1, 0);
-        fprintf(stderr, "+ completed '%s' [%d][%d]\n", cmd->cmd, 
-                WEXITSTATUS(status1), WEXITSTATUS(status2));
-    } else {
-        waitpid(pid1, &status1, 0);
-        fprintf(stderr, "+ completed '%s' [%d]\n", cmd->cmd, 
-            WEXITSTATUS(status1));
+    //close all created pipe(s)
+    if (readingPrev) close(prevPipeReadEnd);
+    if (pipeCreated) close(pipe_fd[1]);
+    
+    //recursive part for the net command
+    if (writingNext) {
+        cmd->currentArgv = cmd->currentArgv->next;
+        forkNExec(cmd, true, pipe_fd[0]);
     }
 }
 
-void resizeArgvList(struct Command *cmd) {
-    static size_t curSize = 0;
-
-    char **temp = (char**)realloc(cmd->argvList, cmd->argvNum*sizeof(char*));
-    //fail
-    if (temp == NULL) return;
-    //
-    cmd->argvList = temp;
-    //
-    size_t i;
-    for (i = curSize; i < cmd->argvNum; i++) {
-        cmd->argvList[i] = (char*)calloc(CMDLINE_MAX, sizeof(char));
-        //fail
-        if (cmd->argvList[i] == NULL) {
-            break;
+void waitForForks(struct Command *cmd) {
+    if (cmd->currentArgv->next == NULL) {
+        //get the current child's status
+        for (int i = 0; i < cmd->numChild; i++) {
+            int status;
+            waitpid(cmd->pidChilds[i], &status, 0);
+            cmd->statusList[i] = WEXITSTATUS(status);
         }
+        //print completion code
+        fprintf(stderr, "+ completed '%s' ", cmd->cmd);
+        for(int i = 0; i < cmd->argvNum; i++){
+            fprintf(stderr, "[%d]", cmd->statusList[i]);
+        }
+        fprintf(stderr, "\n");
     }
-    curSize = i;
 }
 
 int main(void) {
-    struct Command command;
-    command.argvNum = 2;
-    resizeArgvList(&command);
-
-    // for (size_t i = 0; command.argvList[i] != NULL; i++) {
-    //     command.argvList[i] = "{i} \n";
-    //     printf("%s\n", command.argvList[i]);
-    // }
-
-    command.argvList[0] = "0\n";
-
-    // size_t row_size_bytes = sizeof(command.argvList[0]);
-    // size_t element_size_bytes = sizeof(command.argvList[0][0]);
-    // size_t num_cols = row_size_bytes / element_size_bytes;
-    // printf("The row size (number of columns) is: %zu\n", num_cols);
-
-    
-    return 0;
-
+    struct Command command = {0};
     char *eof;
-    allocateMem(command.argv, NON_NULL_MAX, TOKEN_MAX);
-    allocateMem(command.argv2, NON_NULL_MAX, TOKEN_MAX);
-    allocateMem(command.argv3, NON_NULL_MAX, TOKEN_MAX);
+    initializeList(&command.argvList);
+    allocateMemArgv(command.argv, NON_NULL_MAX, TOKEN_MAX);
 
     while (1) {
-        char *nl;
-
         /* Print prompt */
         printf("sshell@ucd$ ");
         fflush(stdout);
-
+        
         /* Get command line */
         eof = fgets(command.cmd, CMDLINE_MAX, stdin);
         if (!eof)
-                /* Make EOF equate to exit */
-                strncpy(command.cmd, "exit\n", CMDLINE_MAX);
-
+        /* Make EOF equate to exit */
+        strncpy(command.cmd, "exit\n", CMDLINE_MAX);
+        
         /* Print command line if stdin is not provided by terminal */
         if (!isatty(STDIN_FILENO)) {
-                printf("%s", command.cmd);
-                fflush(stdout);
+            printf("%s", command.cmd);
+            fflush(stdout);
         }
-
+        
         /* Remove trailing newline from command line */
+        char *nl;
         nl = strchr(command.cmd, '\n');
         if (nl)
                 *nl = '\0';
@@ -330,16 +308,14 @@ int main(void) {
             continue; // prompt for input again
         }
 
-        command.argvNum = 1;
-
         /* Builtin command */
-        if (!strcmp(command.cmd, "exit")) {
-                fprintf(stderr, "Bye...\n");
-                fprintf(stderr, "+ completed '%s' [0]\n", command.cmd); //need exit val
-                break;
-        }
+        int builtCmdResult = builtInCmd(&command);
+        if (builtCmdResult == EXIT_STATUS) break;
+        if (builtCmdResult == PWD_STATUS) continue;
+
 
         //parse input
+        command.argvNum = 0;
         int parseResult = parseCommand(&command);
         if(parseResult == MAX_ARG_SIZE_ERR){
             fprintf(stderr, "Error: Argument too long\n");
@@ -348,12 +324,21 @@ int main(void) {
             fprintf(stderr, "Error: Too many arguments\n");
         }
 
-        //separate multiple arguments
-        separateArgvs(&command);
+        /* Builtin command -> requires parsing */ 
+        int builtCmdResult2 = builtInCmd2(&command);
+        if (builtCmdResult2 == CD_STATUS) continue;
+
+        //sets up list reading && index
+        command.numChild = 0;
+        command.currentArgv = command.argvList.head;
 
         //syscall
-        forkNExec(&command, 0);
+        forkNExec(&command, 0, -1);
+        waitForForks(&command);
+
+        //resets the list after each command
+        freeArgvList(&command.argvList);
     }
-    freeMemory(command.argv, NON_NULL_MAX);
+    freeMemArgv(command.argv, NON_NULL_MAX);
     return EXIT_SUCCESS;
 }
