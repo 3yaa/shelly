@@ -1,0 +1,5 @@
+sshell@ucd$     ls    dir_test
++ completed '    ls    dir_test' [0]
+sshell@ucd$ exit
+Bye...
++ completed 'exit' [0]
