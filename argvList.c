@@ -53,23 +53,31 @@ void pushArgv(ArgvList *list, char **const argv) {
 }
 
 void freeEach(ArgvNode *cur) {
-    ArgvNode *next = cur->next;
-    for (size_t i =0; cur->argv[i] != NULL; i++) {
-        free(cur->argv[i]);
+    if (cur == NULL) return;
+    //free argv
+    if (cur->argv != NULL) {
+        for (size_t i = 0; cur->argv[i] != NULL; i++) {
+            free(cur->argv[i]);
+        }
+        free(cur->argv);
     }
-    free(cur->argv); free(cur);
-    cur = next;
+    //free node
+    free(cur);
 }
 
 void freeArgvList(ArgvList *list) {
     ArgvNode *cur = list->head;
     while (cur) {
+        ArgvNode *next = cur->next;
         freeEach(cur);
+        cur = next;
     }
     //
     cur = list->freeList;
     while (cur) {
+        ArgvNode *next = cur->next;
         freeEach(cur);
+        cur = next;
     }
 
     list->head = list->tail = list->freeList = NULL;
