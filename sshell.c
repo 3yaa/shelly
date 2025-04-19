@@ -26,52 +26,38 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 
 struct Command {
     char cmd[CMDLINE_MAX];
-    char *argv[NON_NULL_MAX];
+    char **argv;
     //
     int argvNum;
     ArgvList argvList;
     ArgvNode *currentArgv;
     //
-    int numChild;
     pid_t pidChilds[100];
     int statusList[100];
 };
 
-// void allocateMemStatus(int *arr, int argvNum) {
-//     arr = (int*)calloc(argvNum, sizeof(argvNum));
-//     if (arr == NULL) {
-//         perror("status type shi");
-//     }
-// }
+char** allocateMemArgv(int rows, int cols) {
+    char **arr = (char**)malloc(rows*sizeof(char*));
+    if (arr == NULL) return NULL;
 
-// void freeMemStatus(int *arr, int argvNum) {
-//     if (arr != NULL) {
-//         free(arr);
-//         arr = NULL;
-//     }
-// }
-
-int allocateMemArgv(char *argv[], int rows, int cols) {
     for (int i = 0; i < rows; i++) {
-        argv[i] = calloc(cols, sizeof(char));
-        if (argv[i] == NULL) {
-            //failed to allocate mem
-            for (int j = 0; j < i; j++) {
-                free(argv[j]);
-            }
-            return -10;
+        arr[i] = (char*)malloc(cols*sizeof(char));
+        if (arr[i] == NULL) {
+            for (int j = 0; j < i; j++) free(arr[j]);
+            free(arr);
+            return NULL;
         }
     }
-    return 0;
+    return arr;
 }
 
-void freeMemArgv(char **argv, int rows) {
+void freeMemArgv(char **arr, int rows) {
+    if (arr == NULL) return;
+
     for (int i = 0; i < rows; i++) {
-        if (argv[i]) {
-            free(argv[i]);
-            argv[i] = NULL;
-        }
+        free(arr[i]);
     }
+    free(arr);
 }
 
 void fixNullEntries(struct Command *cmd) {
@@ -146,7 +132,6 @@ int parseCommand(struct Command *cmd) {
     //puts the argv into the list 
     if (cmd->argvList.count < cmd->argvNum) {
         pushArgv(&cmd->argvList, cmd->argv);
-
     }
     return 0;
 }
@@ -181,9 +166,9 @@ int builtInCmd2(struct Command *cmd) {
     return 0;
 }
 
-void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd) {
+void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd, int childNum) {
     //base case
-    if (cmd->currentArgv == NULL) return;
+    if (childNum >= cmd->argvNum) return;
 
     //set up
     int pipe_fd[2]; bool pipeCreated = false;
@@ -200,7 +185,7 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd) {
         pipeCreated = true;
     }
 
-    //
+    //fork
     pid_t pid = fork();
     if (pid < 0) {
         perror("fork failed");
@@ -211,7 +196,8 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd) {
         return;
     }
 
-    if (pid == 0){ //child
+    //child
+    if (pid == 0){
         //read from past pipe
         if (readingPrev) {
             dup2(prevPipeReadEnd, STDIN_FILENO); //hook up stdin to prev_pipe_read
@@ -228,9 +214,10 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd) {
         exit(1);
     }
 
-                 //parent
-
-    cmd->pidChilds[cmd->numChild++] = pid;
+    //parent
+    
+    //stores pid of each child
+    cmd->pidChilds[childNum++] = pid;
 
     //close all created pipe(s)
     if (readingPrev) close(prevPipeReadEnd);
@@ -239,14 +226,14 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd) {
     //recursive part for the net command
     if (writingNext) {
         cmd->currentArgv = cmd->currentArgv->next;
-        forkNExec(cmd, true, pipe_fd[0]);
+        forkNExec(cmd, true, pipe_fd[0], childNum);
     }
 }
 
 void waitForForks(struct Command *cmd) {
     if (cmd->currentArgv->next == NULL) {
         //get the current child's status
-        for (int i = 0; i < cmd->numChild; i++) {
+        for (int i = 0; i < cmd->argvNum; i++) {
             int status;
             waitpid(cmd->pidChilds[i], &status, 0);
             cmd->statusList[i] = WEXITSTATUS(status);
@@ -261,10 +248,10 @@ void waitForForks(struct Command *cmd) {
 }
 
 int main(void) {
-    struct Command command = {0};
     char *eof;
+    struct Command command = {0};
     initializeList(&command.argvList);
-    allocateMemArgv(command.argv, NON_NULL_MAX, TOKEN_MAX);
+    command.argv = allocateMemArgv(NON_NULL_MAX, TOKEN_MAX);
 
     while (1) {
         /* Print prompt */
@@ -284,10 +271,8 @@ int main(void) {
         }
         
         /* Remove trailing newline from command line */
-        char *nl;
-        nl = strchr(command.cmd, '\n');
-        if (nl)
-                *nl = '\0';
+        char *nl = strchr(command.cmd, '\n');
+        if (nl) *nl = '\0';
 
         // check for if user just pressed enter (no cmd)
         if(strlen(command.cmd) == 0){
@@ -315,8 +300,9 @@ int main(void) {
 
 
         //parse input
-        command.argvNum = 0;
+        command.argvNum = 0; 
         int parseResult = parseCommand(&command);
+        command.currentArgv = command.argvList.head; //sets up list reading && index
         if(parseResult == MAX_ARG_SIZE_ERR){
             fprintf(stderr, "Error: Argument too long\n");
         }
@@ -326,19 +312,19 @@ int main(void) {
 
         /* Builtin command -> requires parsing */ 
         int builtCmdResult2 = builtInCmd2(&command);
-        if (builtCmdResult2 == CD_STATUS) continue;
-
-        //sets up list reading && index
-        command.numChild = 0;
-        command.currentArgv = command.argvList.head;
+        if (builtCmdResult2 == CD_STATUS) {
+            resetArgvList(&command.argvList);
+            continue;
+        }
 
         //syscall
-        forkNExec(&command, 0, -1);
+        forkNExec(&command, 0, -1, 0);
         waitForForks(&command);
 
         //resets the list after each command
-        freeArgvList(&command.argvList);
+        resetArgvList(&command.argvList);
     }
     freeMemArgv(command.argv, NON_NULL_MAX);
+    freeArgvList(&command.argvList);
     return EXIT_SUCCESS;
 }
