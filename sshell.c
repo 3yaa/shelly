@@ -5,10 +5,9 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <fcntl.h>
-/* got Implicit declaration of function ‘wait’... got answer from 
-https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wait*/
 #include <sys/types.h>
 #include <sys/wait.h>
+//
 #include "argvList.h"
 
 //
@@ -16,10 +15,10 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 #define CMDLINE_MAX 512
 #define NON_NULL_MAX 16
 //
-#define EXIT_STATUS -1
-#define PWD_STATUS -2
-#define CD_STATUS -3
-#define EXIT_FAIL -4
+#define EXIT_FAIL -1
+#define CD_STATUS -2
+#define PWD_STATUS -3
+#define EXIT_STATUS -4
 //
 #define CMDLINE_ERR -5
 #define MAX_ARG_ERR -6
@@ -89,7 +88,6 @@ void fixNullEntries(char **argv) {
 }
 
 int outRedirect(char *file) {
-    // printf("--->%s\n", file);
     int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
         return -1;
@@ -232,7 +230,6 @@ int parseCommand(struct Command *cmd) {
         k++; i++; //goes to new token
     }
 
-    // printf("J:%ld | K:%ld", j, k);
     //output redirecting -- changes file w terminal
     if (outRedirecting) {
         outRedirecting = false;
