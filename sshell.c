@@ -19,6 +19,7 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 #define EXIT_STATUS -1
 #define PWD_STATUS -2
 #define CD_STATUS -3
+#define EXIT_FAIL -11
 //
 #define FILE_OPEN_ERR -4
 #define CMDLINE_ERR -5
@@ -28,19 +29,26 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 #define MAX_ARG_SIZE_ERR -9
 #define OUPUT_RDIR_LOCATION_ERR -10
 
-struct Command {
-    char cmd[CMDLINE_MAX];
-    char **argv;
-    //
-    int argvNum;
+typedef struct BackJob {
+    bool isActive; //done - reuse
+    int backChildStatus[36];
+    pid_t backChildPids[36]; //!stores backJob's PID since rest is waiting on that
+    char oldCmd[CMDLINE_MAX]; //stores the CMD of the background job
+} BackCmd;
+
+typedef struct Command {
+    int argvNum; 
+    char **argv;  
+    bool isBackJob;
     ArgvList argvList;
+    pid_t pidChilds[36]; //!
     ArgvNode *currentArgv;
+    char cmd[CMDLINE_MAX]; //input cmd
     //
-    pid_t pidChilds[100];
-    int statusList[100];
-    //
-    int backgroundArgv[10]; //holds the argument# of background jobs
-};
+    int backCmdCount; 
+    BackCmd *backCmd;
+} Command;
+
 
 char** allocateMemArgv(int rows, int cols) {
     char **arr = (char**)malloc(rows*sizeof(char*));
@@ -66,11 +74,11 @@ void freeMemArgv(char **arr, int rows) {
     free(arr);
 }
 
-void fixNullEntries(struct Command *cmd) {
+void fixNullEntries(char **argv) {
     //reinitialize null data
     for (size_t i = 0; i < NON_NULL_MAX; i++) {
-        if (cmd->argv[i] == NULL) {
-            cmd->argv[i] = calloc(TOKEN_MAX, sizeof(char));
+        if (argv[i] == NULL) {
+            argv[i] = calloc(TOKEN_MAX, sizeof(char));
         }
     }
 }
@@ -92,16 +100,15 @@ int missingCMDParse(struct Command *cmd, size_t *i) {
     } else if (cmd->cmd[*i+1] == ' ') {
         (*i)++; // at ' '
         while (cmd->cmd[*i+1] == ' ') (*i)++;
-        (*i)++;
-        if (cmd->cmd[*i] == '\0') return -1;
+        if (cmd->cmd[*i+1] == '\0') return -1;
     }
     return 0;
 }
 
 int parseCommand(struct Command *cmd) {
-    fixNullEntries(cmd);
+    size_t i = 0, j = 0, k = 0; 
+    bool outRedirecting = false;
     //parses command into tokens
-    size_t i = 0, j = 0, k = 0; bool outRedirecting = false; size_t b = 0;
     while (i < CMDLINE_MAX && cmd->cmd[i] != '\0') {
         //too many arguments
         if (j >= NON_NULL_MAX-1) return MAX_ARG_ERR;
@@ -113,13 +120,10 @@ int parseCommand(struct Command *cmd) {
             i++; continue;
         }
 
-        //!checks for background jobs
+        //background jobs
         if (cmd->cmd[i] == '&') {
-            while (cmd->backgroundArgv[b] == 0) {
-                cmd->backgroundArgv[b] = cmd->argvNum;
-                b++;
-                break;
-            }
+            cmd->isBackJob = true;
+            i++; continue;
         }
 
         //output redirection
@@ -151,7 +155,7 @@ int parseCommand(struct Command *cmd) {
             //pushes to list
             pushArgv(&cmd->argvList, cmd->argv);
             //resets
-            fixNullEntries(cmd);
+            fixNullEntries(cmd->argv);
             j = 0; k = 0; i++;
             continue;
         }
@@ -204,13 +208,56 @@ int parseCommand(struct Command *cmd) {
     return 0;
 }
 
+void checkBackCmds(struct Command *cmd) {
+    for (int i = 0; i < cmd->backCmdCount; i++) {
+        if (cmd->backCmd[i].isActive) {
+            int childCount; bool oneSuccess = true;
+            //
+            for (childCount = 0; cmd->backCmd[i].backChildPids[childCount] != -1; childCount++) {
+                // printf("---->%d\n", cmd->backCmd[i].backChildPids[childCount]);
+                int status;
+                pid_t ret = waitpid(cmd->backCmd[i].backChildPids[childCount], &status, WNOHANG);
+                if (ret == cmd->backCmd[i].backChildPids[childCount]) {
+                    if (WIFEXITED(status)) {
+                        cmd->backCmd[i].backChildStatus[childCount] = WEXITSTATUS(status);
+                    }
+                } else {
+                    oneSuccess = false;
+                }
+            }
+            //
+            if (oneSuccess) {
+                fprintf(stderr, "+ completed '%s' ", cmd->backCmd[i].oldCmd);
+                for (int j = 0; j < childCount; j++) {
+                    fprintf(stderr, "[%d]", cmd->backCmd[i].backChildStatus[j]);
+                }
+                fprintf(stderr, "\n");
+                cmd->backCmd[i].isActive = false;
+            }
+        }
+    }
+}
+
+bool canExit(struct Command *cmd) {
+    for (int i = 0; i < cmd->backCmdCount; i++) {
+        if (cmd->backCmd[i].isActive) return false; 
+    }
+    return true;
+}
+
 //build in cmd
 int builtInCmd(struct Command *cmd) {
+    int cmdNum = 0;
     ArgvNode* cur = cmd->argvList.head;
-
-    while (cur) {
+    while (cmdNum < cmd->argvNum) {
         //EXIT
         if (!strcmp(cur->argv[0], "exit")) {
+            //checks if can exit
+            if (!canExit(cmd)) {
+                fprintf(stderr, "Error: active job still running\n");
+                return EXIT_FAIL;
+            }
+            //exits
             fprintf(stderr, "Bye...\n");
             fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
             return EXIT_STATUS;
@@ -234,6 +281,7 @@ int builtInCmd(struct Command *cmd) {
             return CD_STATUS;
         }
         //
+        cmdNum++;
         cur = cur->next;
     }
     return 0;
@@ -290,8 +338,8 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd, int c
     //parent
 
     //!restores default terminal fd
-    dup2(STDIN_FILENO, 0); 
-    dup2(STDOUT_FILENO, 0);
+    // dup2(STDIN_FILENO, 0); 
+    // dup2(STDOUT_FILENO, 0);
     
     //stores pid of each child
     cmd->pidChilds[childNum++] = pid;
@@ -307,24 +355,115 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd, int c
     }
 }
 
+void allocateBackCmd(struct Command *cmd) {
+    //initial allocation
+    if (cmd->backCmd == NULL) {
+        cmd->backCmd = malloc(5 * sizeof(BackCmd));
+        if (cmd->backCmd == NULL) {
+            perror("malloc failed");
+            exit(EXIT_FAILURE);
+        }
+        cmd->backCmdCount = 5;
+        //initializes
+        for (int i = 0; i < 5; i++) {
+            cmd->backCmd[i].isActive = false;
+            cmd->backCmd[i].oldCmd[0] = '\0';
+        }
+    } else {
+        //resize
+        int newCount = cmd->backCmdCount + 5;
+        BackCmd *temp = realloc(cmd->backCmd, newCount * sizeof(BackCmd));
+        if (temp == NULL) {
+            perror("realloc failed");
+            free(cmd->backCmd);
+            exit(EXIT_FAILURE);
+        }
+        cmd->backCmd = temp;
+        //initializes
+        for (int i = cmd->backCmdCount; i < newCount; i++) {
+            cmd->backCmd[i].isActive = false;
+            cmd->backCmd[i].oldCmd[0] = '\0';
+        }
+        cmd->backCmdCount = newCount;
+    }
+}
+
+void freeBackCmd(struct Command *cmd) {
+    if (cmd->backCmd != NULL) {
+        free(cmd->backCmd);
+        cmd->backCmd = NULL;
+        cmd->backCmdCount = 0;
+    }
+}
+
+int createBackCmd(struct Command *cmd) {
+    //empty
+    if (cmd->backCmd == NULL) {
+        allocateBackCmd(cmd);
+        return 0;
+    }
+    
+    int i = 0;
+    //free - reusable - backCmd 
+    for (; i < cmd->backCmdCount; i++) {
+        if (cmd->backCmd[i].isActive == false) {
+            strcpy(cmd->backCmd[i].oldCmd, cmd->cmd);
+            cmd->backCmd[i].isActive = true;
+            return i;
+        }
+    }
+
+    //needs more
+    allocateBackCmd(cmd);
+    i++;
+    strcpy(cmd->backCmd[i].oldCmd, cmd->cmd);
+    cmd->backCmd[i].isActive = true;
+    return i;
+}
+
 void waitForForks(struct Command *cmd) {
+    //if background cmd - just store the PID for later check
+    if (cmd->isBackJob) {
+        int backJobIndex = createBackCmd(cmd);
+        for (int i = 0; i < cmd->argvNum; i++) {
+            cmd->backCmd[backJobIndex].backChildPids[i] = cmd->pidChilds[i];
+        }
+        cmd->backCmd[backJobIndex].backChildPids[cmd->argvNum] = -1;
+        return;
+    }
+
+    //normal cmd
+    int childStatusList[cmd->argvNum];
     //get the current child's status
     for (int i = 0; i < cmd->argvNum; i++) {
         int status;
         waitpid(cmd->pidChilds[i], &status, 0);
-        cmd->statusList[i] = WEXITSTATUS(status);
+        childStatusList[i] = WEXITSTATUS(status);
     }
+
+    //check for background finishes
+    checkBackCmds(cmd);
+
     //print completion code
     fprintf(stderr, "+ completed '%s' ", cmd->cmd);
     for(int i = 0; i < cmd->argvNum; i++){
-        fprintf(stderr, "[%d]", cmd->statusList[i]);
+        fprintf(stderr, "[%d]", childStatusList[i]);
     }
     fprintf(stderr, "\n");
 }
 
-int main(void) {
+void resetForNew(struct Command *cmd) {
+    cmd->argvNum = 0; 
+    fixNullEntries(cmd->argv);
+    cmd->isBackJob = false;
+    resetArgvList(&cmd->argvList);
+} 
+
+int main() {
     char *eof;
     struct Command command = {0};
+    //initialize 
+    allocateBackCmd(&command);
     initializeList(&command.argvList);
     command.argv = allocateMemArgv(NON_NULL_MAX, TOKEN_MAX);
 
@@ -369,14 +508,9 @@ int main(void) {
         }
 
         //parse input
-        command.argvNum = 0; 
         int parseResult = parseCommand(&command);
         command.currentArgv = command.argvList.head; //sets up list reading && index
 
-        for (int i = 0; i < 10; i++) {
-            printf("-------%d\n", command.backgroundArgv[i]);
-        }
-        
         //command error handling
         if(parseResult == MAX_ARG_SIZE_ERR){
             fprintf(stderr, "Error: Argument too long\n");
@@ -397,17 +531,23 @@ int main(void) {
                 fprintf(stderr, "Error: mislocated output redirection\n");
             }
 
-            resetArgvList(&command.argvList);
+            resetForNew(&command);
             continue;
         }
 
         /* Builtin command -> requires parsing */ 
         int builtCmdResult = builtInCmd(&command);
         if (builtCmdResult == EXIT_STATUS) break;
-        if (builtCmdResult == PWD_STATUS || builtCmdResult == CD_STATUS) {
-            resetArgvList(&command.argvList);
+        if (builtCmdResult == PWD_STATUS || builtCmdResult == CD_STATUS || 
+            builtCmdResult == EXIT_FAIL) {
+            resetForNew(&command);
             continue;
         }
+
+        // for (int i = 0; i < 10; i++) {
+        //     printf("%d\n", command.backCmdIndex[i]);
+        // }
+        // printf("\n");
 
         // ArgvNode *cur = command.argvList.head;
         // while (cur) {
@@ -422,10 +562,11 @@ int main(void) {
         forkNExec(&command, 0, -1, 0);
         waitForForks(&command);
 
-        //resets the list after each command
-        resetArgvList(&command.argvList);
+        //reset data
+        resetForNew(&command);
     }
     freeMemArgv(command.argv, NON_NULL_MAX);
     freeArgvList(&command.argvList);
+    freeBackCmd(&command);
     return EXIT_SUCCESS;
 }
