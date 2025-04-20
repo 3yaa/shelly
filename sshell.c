@@ -12,9 +12,9 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 #include "argvList.h"
 
 //
+#define TOKEN_MAX 32
 #define CMDLINE_MAX 512
 #define NON_NULL_MAX 16
-#define TOKEN_MAX 32
 //
 #define EXIT_STATUS -1
 #define PWD_STATUS -2
@@ -514,6 +514,30 @@ void resetForNew(struct Command *cmd) {
     dup2(cmd->terminalFd[1], STDOUT_FILENO);
 } 
 
+void errorMsgs(int parseResult) {
+    if(parseResult == MAX_ARG_SIZE_ERR) {
+        fprintf(stderr, "Error: Argument too long\n");
+    } else if (parseResult == MAX_ARG_ERR) {
+        fprintf(stderr, "Error: too many process arguments\n");
+    } else if (parseResult == MISSING_CMD_ERR) {
+        fprintf(stderr, "Error: missing command\n");
+    } else if (parseResult == BACK_JOB_LOCATION_ERR) {
+        fprintf(stderr, "Error: mislocated background sign\n");
+    } else if (parseResult == OUTPUT_RDIR_ERR) {
+        fprintf(stderr, "Error: no output file\n");
+    } else if (parseResult == OUTPUT_FILE_OPEN_ERR) {
+        fprintf(stderr, "Error: cannot open output file\n");
+    } else if (parseResult == OUTPUT_LOCATION_ERR) {
+        fprintf(stderr, "Error: mislocated output redirection\n");
+    } else if (parseResult == INPUT_LOCATION_ERR) {
+        fprintf(stderr, "Error: mislocated input redirection\n");
+    } else if (parseResult == INPUT_FILE_OPEN_ERR) {
+        fprintf(stderr, "Error: cannot open input file\n");
+    } else if (parseResult == INPUT_RDIR_ERR) {
+        fprintf(stderr, "Error: no input file\n");
+    }
+}
+
 int main() {
     char *eof;
     struct Command command = {0};
@@ -573,28 +597,7 @@ int main() {
 
         //command error handling
         if (parseResult < 0) {
-            //error msgs
-            if(parseResult == MAX_ARG_SIZE_ERR) {
-                fprintf(stderr, "Error: Argument too long\n");
-            } else if (parseResult == MAX_ARG_ERR) {
-                fprintf(stderr, "Error: too many process arguments\n");
-            } else if (parseResult == MISSING_CMD_ERR) {
-                fprintf(stderr, "Error: missing command\n");
-            } else if (parseResult == BACK_JOB_LOCATION_ERR) {
-                fprintf(stderr, "Error: mislocated background sign\n");
-            } else if (parseResult == OUTPUT_RDIR_ERR) {
-                fprintf(stderr, "Error: no output file\n");
-            } else if (parseResult == OUTPUT_FILE_OPEN_ERR) {
-                fprintf(stderr, "Error: cannot open output file\n");
-            } else if (parseResult == OUTPUT_LOCATION_ERR) {
-                fprintf(stderr, "Error: mislocated output redirection\n");
-            } else if (parseResult == INPUT_LOCATION_ERR) {
-                fprintf(stderr, "Error: mislocated input redirection\n");
-            } else if (parseResult == INPUT_FILE_OPEN_ERR) {
-                fprintf(stderr, "Error: cannot open input file\n");
-            } else if (parseResult == INPUT_RDIR_ERR) {
-                fprintf(stderr, "Error: no input file\n");
-            }
+            errorMsgs(parseResult);
             //resets n restarts
             resetForNew(&command);
             continue;
