@@ -19,15 +19,18 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 #define EXIT_STATUS -1
 #define PWD_STATUS -2
 #define CD_STATUS -3
-#define EXIT_FAIL -11
+#define EXIT_FAIL -4
 //
-#define FILE_OPEN_ERR -4
 #define CMDLINE_ERR -5
 #define MAX_ARG_ERR -6
-#define OUTPUT_RDIR_ERR -7
-#define MISSING_CMD_ERR -8
-#define MAX_ARG_SIZE_ERR -9
-#define OUPUT_RDIR_LOCATION_ERR -10
+#define INPUT_RDIR_ERR -7 //Error: no input file
+#define OUTPUT_RDIR_ERR -8
+#define MISSING_CMD_ERR -9
+#define MAX_ARG_SIZE_ERR -10
+#define INPUT_LOCATION_ERR -11 //Error: mislocated input redirection
+#define OUTPUT_LOCATION_ERR -12
+#define INPUT_FILE_OPEN_ERR -13 //Error: cannot open input file
+#define OUTPUT_FILE_OPEN_ERR -14
 
 typedef struct BackJob {
     bool isActive; //done - reuse
@@ -47,6 +50,8 @@ typedef struct Command {
     //
     int backCmdCount; 
     BackCmd *backCmd;
+    //
+    int terminalFd[2];
 } Command;
 
 
@@ -84,12 +89,24 @@ void fixNullEntries(char **argv) {
 }
 
 int outRedirect(char *file) {
-    int fd = open(file, O_RDWR, 0644);
+    // printf("--->%s\n", file);
+    int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
-        // return -1;
+        return -1;
     }
-    //links it to stdout
+    //links file to stdout
     dup2(fd, STDOUT_FILENO);
+    close(fd);
+    return 0;
+}
+
+int inRedirect(char *file) {
+    int fd = open(file, O_RDONLY, 0644);
+    if (fd == -1) {
+        return -1;
+    }
+    //links file to stdout
+    dup2(fd, STDIN_FILENO);
     close(fd);
     return 0;
 }
@@ -107,7 +124,8 @@ int missingCMDParse(struct Command *cmd, size_t *i) {
 
 int parseCommand(struct Command *cmd) {
     size_t i = 0, j = 0, k = 0; 
-    bool outRedirecting = false;
+    bool inRedirecting = false;
+    bool outRedirecting = false; 
     //parses command into tokens
     while (i < CMDLINE_MAX && cmd->cmd[i] != '\0') {
         //too many arguments
@@ -126,12 +144,38 @@ int parseCommand(struct Command *cmd) {
             i++; continue;
         }
 
+        //input redirection 
+        if (cmd->cmd[i] == '<') {
+            //makes sure theres cmd before output redir
+            if (j == 0 && k == 0 && cmd->argvNum < 1) return MISSING_CMD_ERR;
+            //makes sure theres output file
+            if (missingCMDParse(cmd, &i) == -1) return INPUT_RDIR_ERR;
+            //
+            if (cmd->argvNum >= 1) return INPUT_LOCATION_ERR;
+            
+            //ends word
+            if (k > 0) {
+                cmd->argv[j][k] = '\0';
+                j++; k = 0;
+            }
+
+            inRedirecting = true;
+            i++; continue;
+        }
+
         //output redirection
         if (cmd->cmd[i] == '>') {
             //makes sure theres cmd before output redir
             if (j == 0 && k == 0 && cmd->argvNum < 1) return MISSING_CMD_ERR;
             //makes sure theres output file
             if (missingCMDParse(cmd, &i) == -1) return OUTPUT_RDIR_ERR;
+            
+            //ends word
+            if (k > 0) {
+                cmd->argv[j][k] = '\0';
+                j++; k = 0;
+            }
+            
             outRedirecting = true;
             i++; continue;
         }
@@ -143,7 +187,7 @@ int parseCommand(struct Command *cmd) {
             //makes sure theres cmd after pipe
             if (missingCMDParse(cmd, &i) == -1) return MISSING_CMD_ERR;
             //cannot pipe after ouput
-            if (outRedirecting) return OUPUT_RDIR_LOCATION_ERR;
+            if (outRedirecting) return OUTPUT_LOCATION_ERR; 
             
             //ends word
             if (k > 0) {
@@ -166,11 +210,13 @@ int parseCommand(struct Command *cmd) {
             if (k > 0) {
                 cmd->argv[j][k] = '\0';
                 j++; k = 0;
-                //if out redirecting
-                if (outRedirecting) {
+
+                //output|input redirecting -- moves it back a word
+                if (outRedirecting || inRedirecting) {
                     j = j-1; //goes back to the file word
-                    int oRedirSuccess = outRedirect(cmd->argv[j]);
-                    if (oRedirSuccess == -1) return FILE_OPEN_ERR;
+                    // outRedirecting = false; //!breaks mislocated err
+                    // int oRedirSuccess = outRedirect(cmd->argv[j]);
+                    // if (oRedirSuccess == -1) return OUTPUT_FILE_OPEN_ERR;
                 }
             }
             //kills multi whitespace
@@ -184,12 +230,19 @@ int parseCommand(struct Command *cmd) {
         k++; i++; //goes to new token
     }
 
-    //check for redirect
+    // printf("J:%ld | K:%ld", j, k);
+    //output redirecting -- changes file w terminal
     if (outRedirecting) {
         outRedirecting = false;
         int oRedirSuccess = outRedirect(cmd->argv[j]);
-        if (oRedirSuccess == -1) return FILE_OPEN_ERR;
-        j = j-1; //goes back so it gets nullified
+        if (oRedirSuccess == -1) return OUTPUT_FILE_OPEN_ERR;
+        k = 0; //goes back so it gets nullified
+    }
+    if (inRedirecting) {
+        inRedirecting = false;
+        int iRedirSuccess = inRedirect(cmd->argv[j]);
+        if (iRedirSuccess == -1) return INPUT_FILE_OPEN_ERR;
+        k = 0; //goes back so it gets nullified
     }
 
     //ends line and puts NULL
@@ -197,7 +250,7 @@ int parseCommand(struct Command *cmd) {
         cmd->argv[j][k] = '\0';
         cmd->argv[j+1] = NULL;
         cmd->argvNum++;
-    } else if (k == 1) {
+    } else {
         cmd->argv[j] = NULL;
         cmd->argvNum++;
     }
@@ -337,10 +390,6 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd, int c
 
     //parent
 
-    //!restores default terminal fd
-    // dup2(STDIN_FILENO, 0); 
-    // dup2(STDOUT_FILENO, 0);
-    
     //stores pid of each child
     cmd->pidChilds[childNum++] = pid;
 
@@ -457,6 +506,9 @@ void resetForNew(struct Command *cmd) {
     fixNullEntries(cmd->argv);
     cmd->isBackJob = false;
     resetArgvList(&cmd->argvList);
+    //
+    dup2(cmd->terminalFd[0], STDIN_FILENO);
+    dup2(cmd->terminalFd[1], STDOUT_FILENO);
 } 
 
 int main() {
@@ -466,6 +518,8 @@ int main() {
     allocateBackCmd(&command);
     initializeList(&command.argvList);
     command.argv = allocateMemArgv(NON_NULL_MAX, TOKEN_MAX);
+    command.terminalFd[0] = dup(STDIN_FILENO);
+    command.terminalFd[1] = dup(STDOUT_FILENO);
 
     while (1) {
         /* Print prompt */
@@ -518,19 +572,27 @@ int main() {
         } else if (parseResult == MAX_ARG_ERR){
             fprintf(stderr, "Error: Too many arguments\n");
             return MAX_ARG_ERR;
-        } else if (parseResult == MISSING_CMD_ERR || parseResult == FILE_OPEN_ERR ||
-                   parseResult == OUPUT_RDIR_LOCATION_ERR ||
-                   parseResult == OUTPUT_RDIR_ERR) {
+        } else if (parseResult == MISSING_CMD_ERR || parseResult == OUTPUT_FILE_OPEN_ERR ||
+                   parseResult == OUTPUT_LOCATION_ERR || parseResult == OUTPUT_RDIR_ERR ||
+                   parseResult == INPUT_RDIR_ERR || parseResult == INPUT_LOCATION_ERR ||
+                   parseResult == INPUT_FILE_OPEN_ERR) {
+                
             if (parseResult == MISSING_CMD_ERR) {
                 fprintf(stderr, "Error: missing command\n");
             } else if (parseResult == OUTPUT_RDIR_ERR) {
                 fprintf(stderr, "Error: no output file\n");
-            } else if (parseResult == FILE_OPEN_ERR) {
+            } else if (parseResult == OUTPUT_FILE_OPEN_ERR) {
                 fprintf(stderr, "Error: cannot open output file\n");
-            } else if (parseResult == OUPUT_RDIR_LOCATION_ERR) {
+            } else if (parseResult == OUTPUT_LOCATION_ERR) {
                 fprintf(stderr, "Error: mislocated output redirection\n");
+            } else if (parseResult == INPUT_LOCATION_ERR) {
+                fprintf(stderr, "Error: mislocated input redirection\n");
+            } else if (parseResult == INPUT_FILE_OPEN_ERR) {
+                fprintf(stderr, "Error: cannot open input file\n");
+            } else if (parseResult == INPUT_RDIR_ERR) {
+                fprintf(stderr, "Error: no input file\n");
             }
-
+ 
             resetForNew(&command);
             continue;
         }
@@ -544,19 +606,17 @@ int main() {
             continue;
         }
 
-        // for (int i = 0; i < 10; i++) {
-        //     printf("%d\n", command.backCmdIndex[i]);
-        // }
-        // printf("\n");
-
+        
         // ArgvNode *cur = command.argvList.head;
-        // while (cur) {
-        //     for (int i = 0; cur->argv[i] != NULL; i++) {
-        //         printf("%s\n", cur->argv[i]);
+        // printf("*****\n");
+        // while(cur) {
+        //     for (int i = 0; cur->argv[i] != NULL;i++) {
+        //         printf("%s ", cur->argv[i]);
         //     }
         //     printf("\n");
         //     cur = cur->next;
         // }
+
 
         //syscall
         forkNExec(&command, 0, -1, 0);
@@ -568,5 +628,8 @@ int main() {
     freeMemArgv(command.argv, NON_NULL_MAX);
     freeArgvList(&command.argvList);
     freeBackCmd(&command);
+    //
+    close(command.terminalFd[0]);
+    close(command.terminalFd[1]);
     return EXIT_SUCCESS;
 }
