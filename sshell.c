@@ -23,35 +23,35 @@ https://stackoverflow.com/questions/41884685/implicit-declaration-of-function-wa
 //
 #define CMDLINE_ERR -5
 #define MAX_ARG_ERR -6
-#define INPUT_RDIR_ERR -7 //Error: no input file
+#define INPUT_RDIR_ERR -7 
 #define OUTPUT_RDIR_ERR -8
 #define MISSING_CMD_ERR -9
 #define MAX_ARG_SIZE_ERR -10
-#define INPUT_LOCATION_ERR -11 //Error: mislocated input redirection
+#define INPUT_LOCATION_ERR -11 
 #define OUTPUT_LOCATION_ERR -12
-#define INPUT_FILE_OPEN_ERR -13 //Error: cannot open input file
+#define INPUT_FILE_OPEN_ERR -13 
 #define OUTPUT_FILE_OPEN_ERR -14
+#define BACK_JOB_LOCATION_ERR -15
 
 typedef struct BackJob {
-    bool isActive; //done - reuse
-    int backChildStatus[36];
-    pid_t backChildPids[36]; //!stores backJob's PID since rest is waiting on that
+    bool isActive; //false -> reuse
+    int backChildStatus[36]; //stores each child's status
+    pid_t backChildPids[36]; //stores backJob's PID since rest is waiting on that
     char oldCmd[CMDLINE_MAX]; //stores the CMD of the background job
 } BackCmd;
 
 typedef struct Command {
     int argvNum; 
-    char **argv;  
+    char **argv;
     bool isBackJob;
+    int terminalFd[2]; //holds location of terminal
     ArgvList argvList;
-    pid_t pidChilds[36]; //!
+    pid_t pidChilds[36]; //stores PID
     ArgvNode *currentArgv;
     char cmd[CMDLINE_MAX]; //input cmd
-    //
+    //background jobs
     int backCmdCount; 
     BackCmd *backCmd;
-    //
-    int terminalFd[2];
 } Command;
 
 
@@ -129,9 +129,9 @@ int parseCommand(struct Command *cmd) {
     //parses command into tokens
     while (i < CMDLINE_MAX && cmd->cmd[i] != '\0') {
         //too many arguments
-        if (j >= NON_NULL_MAX-1) return MAX_ARG_ERR;
+        if (j >= NON_NULL_MAX) return MAX_ARG_ERR;
         //individual token too big
-        if (k >= TOKEN_MAX-1) return MAX_ARG_SIZE_ERR;
+        if (k >= TOKEN_MAX) return MAX_ARG_SIZE_ERR;
 
         //kills "" && ''
         if ((cmd->cmd[i] == '\'' || cmd->cmd[i] == '"') && j != 0) {
@@ -150,7 +150,7 @@ int parseCommand(struct Command *cmd) {
             if (j == 0 && k == 0 && cmd->argvNum < 1) return MISSING_CMD_ERR;
             //makes sure theres output file
             if (missingCMDParse(cmd, &i) == -1) return INPUT_RDIR_ERR;
-            //
+            //cannot have a pipe before input redirection
             if (cmd->argvNum >= 1) return INPUT_LOCATION_ERR;
             
             //ends word
@@ -186,6 +186,8 @@ int parseCommand(struct Command *cmd) {
             if (j == 0 && k == 0 && cmd->argvNum < 1) return MISSING_CMD_ERR; 
             //makes sure theres cmd after pipe
             if (missingCMDParse(cmd, &i) == -1) return MISSING_CMD_ERR;
+            //cannot pipe after background
+            if (cmd->isBackJob) return BACK_JOB_LOCATION_ERR;
             //cannot pipe after ouput
             if (outRedirecting) return OUTPUT_LOCATION_ERR; 
             
@@ -308,6 +310,7 @@ int builtInCmd(struct Command *cmd) {
             //checks if can exit
             if (!canExit(cmd)) {
                 fprintf(stderr, "Error: active job still running\n");
+                fprintf(stderr, "+ completed '%s' [1]\n", cmd->cmd);
                 return EXIT_FAIL;
             }
             //exits
@@ -491,7 +494,7 @@ void waitForForks(struct Command *cmd) {
     }
 
     //check for background finishes
-    checkBackCmds(cmd);
+    // checkBackCmds(cmd); //!if you want to print &cmd print before cmd 
 
     //print completion code
     fprintf(stderr, "+ completed '%s' ", cmd->cmd);
@@ -522,6 +525,9 @@ int main() {
     command.terminalFd[1] = dup(STDOUT_FILENO);
 
     while (1) {
+        //check for background jobs
+        checkBackCmds(&command);
+
         /* Print prompt */
         printf("sshell@ucd$ ");
         fflush(stdout);
@@ -566,19 +572,16 @@ int main() {
         command.currentArgv = command.argvList.head; //sets up list reading && index
 
         //command error handling
-        if(parseResult == MAX_ARG_SIZE_ERR){
-            fprintf(stderr, "Error: Argument too long\n");
-            return MAX_ARG_SIZE_ERR;
-        } else if (parseResult == MAX_ARG_ERR){
-            fprintf(stderr, "Error: Too many arguments\n");
-            return MAX_ARG_ERR;
-        } else if (parseResult == MISSING_CMD_ERR || parseResult == OUTPUT_FILE_OPEN_ERR ||
-                   parseResult == OUTPUT_LOCATION_ERR || parseResult == OUTPUT_RDIR_ERR ||
-                   parseResult == INPUT_RDIR_ERR || parseResult == INPUT_LOCATION_ERR ||
-                   parseResult == INPUT_FILE_OPEN_ERR) {
-                
-            if (parseResult == MISSING_CMD_ERR) {
+        if (parseResult < 0) {
+            //error msgs
+            if(parseResult == MAX_ARG_SIZE_ERR) {
+                fprintf(stderr, "Error: Argument too long\n");
+            } else if (parseResult == MAX_ARG_ERR) {
+                fprintf(stderr, "Error: too many process arguments\n");
+            } else if (parseResult == MISSING_CMD_ERR) {
                 fprintf(stderr, "Error: missing command\n");
+            } else if (parseResult == BACK_JOB_LOCATION_ERR) {
+                fprintf(stderr, "Error: mislocated background sign\n");
             } else if (parseResult == OUTPUT_RDIR_ERR) {
                 fprintf(stderr, "Error: no output file\n");
             } else if (parseResult == OUTPUT_FILE_OPEN_ERR) {
@@ -592,7 +595,7 @@ int main() {
             } else if (parseResult == INPUT_RDIR_ERR) {
                 fprintf(stderr, "Error: no input file\n");
             }
- 
+            //resets n restarts
             resetForNew(&command);
             continue;
         }
@@ -605,18 +608,6 @@ int main() {
             resetForNew(&command);
             continue;
         }
-
-        
-        // ArgvNode *cur = command.argvList.head;
-        // printf("*****\n");
-        // while(cur) {
-        //     for (int i = 0; cur->argv[i] != NULL;i++) {
-        //         printf("%s ", cur->argv[i]);
-        //     }
-        //     printf("\n");
-        //     cur = cur->next;
-        // }
-
 
         //syscall
         forkNExec(&command, 0, -1, 0);
