@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,6 +52,9 @@ typedef struct Command {
     //background jobs
     int backCmdCount; 
     BackCmd *backCmd;
+    //redirection
+    char *inputFile; //stores the latest input file
+    char *outputFile; //stores the latest output file
 } Command;
 
 
@@ -90,7 +94,7 @@ void fixNullEntries(char **argv) {
 int outRedirect(char *file) {
     int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd == -1) {
-        return -1;
+        return OUTPUT_FILE_OPEN_ERR;
     }
     //links file to stdout
     dup2(fd, STDOUT_FILENO);
@@ -101,9 +105,9 @@ int outRedirect(char *file) {
 int inRedirect(char *file) {
     int fd = open(file, O_RDONLY, 0644);
     if (fd == -1) {
-        return -1;
+        return INPUT_FILE_OPEN_ERR;
     }
-    //links file to stdout
+    //links file to stdin
     dup2(fd, STDIN_FILENO);
     close(fd);
     return 0;
@@ -122,8 +126,7 @@ int missingCMDParse(struct Command *cmd, size_t *i) {
 
 int parseCommand(struct Command *cmd) {
     size_t i = 0, j = 0, k = 0; 
-    bool inRedirecting = false;
-    bool outRedirecting = false; 
+    bool commandStarted = false; //check if a command started for the current pipe segment
     //parses command into tokens
     while (i < CMDLINE_MAX && cmd->cmd[i] != '\0') {
         //too many arguments
@@ -156,9 +159,23 @@ int parseCommand(struct Command *cmd) {
                 cmd->argv[j][k] = '\0';
                 j++; k = 0;
             }
+            
+            i++; 
+            //store the input filename
+            while(cmd->cmd[i] == ' ') i++; //skip leading WS after <
+            size_t start = i; //starting indec of input filename
+            while(cmd->cmd[i] != '\0' && cmd->cmd[i] != ' ') i ++; //increment index until end of stirng
+            size_t len = i - start; //len of input filename
+            char* newInputFile = malloc(len + 1);
+            if (!newInputFile) return -1; //malloc error
+            strncpy(newInputFile, &cmd->cmd[start], len); //copy from command string to inputFile
+            newInputFile[len] = '\0'; 
 
-            inRedirecting = true;
-            i++; continue;
+            if(cmd->inputFile){ //if another file exists
+                free(cmd->inputFile);
+            }
+            cmd->inputFile = newInputFile; //want to use the most recently opened file 
+            continue;
         }
 
         //output redirection
@@ -174,20 +191,34 @@ int parseCommand(struct Command *cmd) {
                 j++; k = 0;
             }
             
-            outRedirecting = true;
-            i++; continue;
+            i++; 
+            //store output filename
+            while (cmd->cmd[i] == ' ') i++;
+            size_t start = i;
+            while (cmd->cmd[i] != '\0' && cmd->cmd[i] != ' ') i++;
+            size_t len = i - start;
+            char* newOutputFile = malloc(len + 1);
+            if (!newOutputFile) return -1; //malloc err
+            strncpy(newOutputFile, &cmd->cmd[start], len);
+            newOutputFile[len] = '\0';
+
+            if(cmd->outputFile){
+                free(cmd->outputFile);
+            }
+            cmd->outputFile = newOutputFile;
+            continue;
         }
 
         //pipes
         if (cmd->cmd[i] == '|') {
             //makes sure theres cmd before pipe
-            if (j == 0 && k == 0 && cmd->argvNum < 1) return MISSING_CMD_ERR; 
+            if (!commandStarted) return MISSING_CMD_ERR;
             //makes sure theres cmd after pipe
             if (missingCMDParse(cmd, &i) == -1) return MISSING_CMD_ERR;
             //cannot pipe after background
             if (cmd->isBackJob) return BACK_JOB_LOCATION_ERR;
             //cannot pipe after ouput
-            if (outRedirecting) return OUTPUT_LOCATION_ERR; 
+            // if (outRedirecting) return OUTPUT_LOCATION_ERR; 
             
             //ends word
             if (k > 0) {
@@ -201,6 +232,7 @@ int parseCommand(struct Command *cmd) {
             //resets
             fixNullEntries(cmd->argv);
             j = 0; k = 0; i++;
+            commandStarted= false;
             continue;
         }
 
@@ -210,14 +242,6 @@ int parseCommand(struct Command *cmd) {
             if (k > 0) {
                 cmd->argv[j][k] = '\0';
                 j++; k = 0;
-
-                //output|input redirecting -- moves it back a word
-                if (outRedirecting || inRedirecting) {
-                    j = j-1; //goes back to the file word
-                    // outRedirecting = false; //!breaks mislocated err
-                    // int oRedirSuccess = outRedirect(cmd->argv[j]);
-                    // if (oRedirSuccess == -1) return OUTPUT_FILE_OPEN_ERR;
-                }
             }
             //kills multi whitespace
             while (cmd->cmd[i+1] == ' ') i++;
@@ -228,20 +252,21 @@ int parseCommand(struct Command *cmd) {
         //puts cmd into argv
         cmd->argv[j][k] = cmd->cmd[i];
         k++; i++; //goes to new token
+        commandStarted = true;
     }
 
     //output redirecting -- changes file w terminal
-    if (outRedirecting) {
-        outRedirecting = false;
-        int oRedirSuccess = outRedirect(cmd->argv[j]);
-        if (oRedirSuccess == -1) return OUTPUT_FILE_OPEN_ERR;
-        k = 0; //goes back so it gets nullified
+    if(cmd->outputFile){
+        int oRedirSuccess = outRedirect(cmd->outputFile);
+        free(cmd->outputFile);
+        cmd->outputFile = NULL; //reset
+        if (oRedirSuccess == OUTPUT_FILE_OPEN_ERR) return OUTPUT_FILE_OPEN_ERR;
     }
-    if (inRedirecting) {
-        inRedirecting = false;
-        int iRedirSuccess = inRedirect(cmd->argv[j]);
-        if (iRedirSuccess == -1) return INPUT_FILE_OPEN_ERR;
-        k = 0; //goes back so it gets nullified
+    if (cmd->inputFile) {
+        int iRedirSuccess = inRedirect(cmd->inputFile);
+        free(cmd->inputFile);
+        cmd->inputFile = NULL; //reset
+        if (iRedirSuccess == INPUT_FILE_OPEN_ERR) return INPUT_FILE_OPEN_ERR;
     }
 
     //ends line and puts NULL
