@@ -2,3 +2,6 @@
 your_output
 *.o
 sshell
+tester.sh 
+myapp.log
+*.txt

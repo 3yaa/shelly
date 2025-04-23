@@ -212,11 +212,6 @@ int parseCommand(struct Command *cmd) {
     bool commandStarted = false; //check if a command started for the current pipe segment
     //parses command into tokens
     while (i < CMDLINE_MAX && cmd->cmd[i] != '\0') {
-        //too many arguments
-        if (j >= NON_NULL_MAX) return MAX_ARG_ERR;
-        //individual token too big
-        if (k >= TOKEN_MAX) return MAX_ARG_SIZE_ERR;
-
         //kills "" && ''
         if ((cmd->cmd[i] == '\'' || cmd->cmd[i] == '"') && j != 0) {
             i++; continue;
@@ -315,7 +310,7 @@ int parseCommand(struct Command *cmd) {
             //resets
             fixNullEntries(cmd->argv);
             j = 0; k = 0; i++;
-            commandStarted= false;
+            commandStarted = false;
             continue;
         }
 
@@ -331,6 +326,11 @@ int parseCommand(struct Command *cmd) {
             i++;
             continue;
         }
+        
+        //too many arguments
+        if (j >= NON_NULL_MAX) return MAX_ARG_ERR;
+        //individual token too big
+        if (k >= TOKEN_MAX) return MAX_ARG_SIZE_ERR;
         
         //puts cmd into argv
         cmd->argv[j][k] = cmd->cmd[i];
@@ -656,6 +656,16 @@ int main() {
         //parse input
         int parseResult = parseCommand(&command);
         command.currentArgv = command.argvList.head; //sets up list reading && index
+
+        // printf("*******\n");
+        // ArgvNode *cur = command.argvList.head;
+        // while(cur) {
+        //     for (int i = 0; cur->argv[i] != NULL; i++) {
+        //         printf("%s ", cur->argv[i]);
+        //     }
+        //     printf("\n");
+        //     cur = cur->next;
+        // }
 
         //command error handling
         if (parseResult < 0) {
