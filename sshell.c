@@ -33,20 +33,21 @@
 #define OUTPUT_FILE_OPEN_ERR -14
 #define BACK_JOB_LOCATION_ERR -15
 
-typedef struct BackJob {
+
+typedef struct BackCmd {
     bool isActive; //false -> reuse
-    int backChildStatus[36]; //stores each child's status
-    pid_t backChildPids[36]; //stores backJob's PID since rest is waiting on that
+    int *backChildStatus; //stores each child's status
+    pid_t *backChildPids; //stores backJob's PID since rest is waiting on that
     char oldCmd[CMDLINE_MAX]; //stores the CMD of the background job
 } BackCmd;
 
 typedef struct Command {
     int argvNum; 
-    char **argv;
+    char **argv; //[16][32]
     bool isBackJob;
-    int terminalFd[2]; //holds location of terminal
+    int terminalFd[2]; //holds location of terminal [in,out]
     ArgvList argvList;
-    pid_t pidChilds[36]; //stores PID
+    pid_t *pidChilds; //stores PID //[16]
     ArgvNode *currentArgv;
     char cmd[CMDLINE_MAX]; //input cmd
     //background jobs
@@ -80,6 +81,88 @@ void freeMemArgv(char **arr, int rows) {
         free(arr[i]);
     }
     free(arr);
+}
+
+void allocateChildPid(struct Command *cmd) {
+    cmd->pidChilds = malloc(NON_NULL_MAX*sizeof(pid_t));
+    if (cmd->pidChilds == NULL) {
+        perror("malloc failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void freeChildPid(struct Command *cmd) {
+    if (cmd->pidChilds != NULL) {
+        free(cmd->pidChilds);
+        cmd->pidChilds = NULL;
+    }
+}
+
+void allocateBackMembers(struct BackCmd *backCmdEntry, int childNum) {
+    backCmdEntry->backChildPids = malloc(childNum*sizeof(pid_t));
+    backCmdEntry->backChildStatus = malloc(childNum*sizeof(int));
+    if (backCmdEntry->backChildPids == NULL) {
+        perror("malloc failed");
+        exit(EXIT_FAILURE);
+    }
+    if (backCmdEntry->backChildStatus == NULL) {
+        perror("malloc failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void allocateBackCmd(struct Command *cmd) {
+    //initial allocation
+    if (cmd->backCmd == NULL) {
+        cmd->backCmd = malloc(NON_NULL_MAX*sizeof(BackCmd));
+        if (cmd->backCmd == NULL) {
+            perror("malloc failed");
+            exit(EXIT_FAILURE);
+        }
+        cmd->backCmdCount = NON_NULL_MAX;
+        //initializes
+        for (int i = 0; i < cmd->backCmdCount; i++) {
+            cmd->backCmd[i].isActive = false;
+            cmd->backCmd[i].oldCmd[0] = '\0';
+            allocateBackMembers(&cmd->backCmd[i], cmd->argvNum);
+        }
+    } else {
+        //resize
+        int newCount = cmd->backCmdCount+NON_NULL_MAX;
+        BackCmd *temp = realloc(cmd->backCmd, newCount * sizeof(BackCmd));
+        if (temp == NULL) {
+            perror("realloc failed");
+            free(cmd->backCmd);
+            exit(EXIT_FAILURE);
+        }
+        cmd->backCmd = temp;
+        //initializes
+        for (int i = cmd->backCmdCount; i < newCount; i++) {
+            cmd->backCmd[i].isActive = false;
+            cmd->backCmd[i].oldCmd[0] = '\0';
+            allocateBackMembers(&cmd->backCmd[i], cmd->argvNum);
+        }
+        cmd->backCmdCount = newCount;
+    }
+}
+
+void freeBackCmd(struct Command *cmd) {
+    if (cmd->backCmd != NULL) {
+        //free pid
+        if (cmd->backCmd->backChildStatus != NULL) {
+            free(cmd->backCmd->backChildStatus);
+            cmd->backCmd->backChildStatus = NULL;
+        }
+        //free status
+        if (cmd->backCmd->backChildPids != NULL) {
+            free(cmd->backCmd->backChildPids);
+            cmd->backCmd->backChildPids = NULL;
+        }
+        //struct
+        free(cmd->backCmd);
+        cmd->backCmd = NULL;
+        cmd->backCmdCount = 0;
+    }
 }
 
 void fixNullEntries(char **argv) {
@@ -256,7 +339,7 @@ int parseCommand(struct Command *cmd) {
     }
 
     //output redirecting -- changes file w terminal
-    if(cmd->outputFile){
+    if(cmd->outputFile) {
         int oRedirSuccess = outRedirect(cmd->outputFile);
         free(cmd->outputFile);
         cmd->outputFile = NULL; //reset
@@ -281,86 +364,6 @@ int parseCommand(struct Command *cmd) {
     //puts the argv into the list 
     if (cmd->argvList.count < cmd->argvNum) {
         pushArgv(&cmd->argvList, cmd->argv);
-    }
-    return 0;
-}
-
-void checkBackCmds(struct Command *cmd) {
-    for (int i = 0; i < cmd->backCmdCount; i++) {
-        if (cmd->backCmd[i].isActive) {
-            int childCount; bool oneSuccess = true;
-            //
-            for (childCount = 0; cmd->backCmd[i].backChildPids[childCount] != -1; childCount++) {
-                // printf("---->%d\n", cmd->backCmd[i].backChildPids[childCount]);
-                int status;
-                pid_t ret = waitpid(cmd->backCmd[i].backChildPids[childCount], &status, WNOHANG);
-                if (ret == cmd->backCmd[i].backChildPids[childCount]) {
-                    if (WIFEXITED(status)) {
-                        cmd->backCmd[i].backChildStatus[childCount] = WEXITSTATUS(status);
-                    }
-                } else {
-                    oneSuccess = false;
-                }
-            }
-            //
-            if (oneSuccess) {
-                fprintf(stderr, "+ completed '%s' ", cmd->backCmd[i].oldCmd);
-                for (int j = 0; j < childCount; j++) {
-                    fprintf(stderr, "[%d]", cmd->backCmd[i].backChildStatus[j]);
-                }
-                fprintf(stderr, "\n");
-                cmd->backCmd[i].isActive = false;
-            }
-        }
-    }
-}
-
-bool canExit(struct Command *cmd) {
-    for (int i = 0; i < cmd->backCmdCount; i++) {
-        if (cmd->backCmd[i].isActive) return false; 
-    }
-    return true;
-}
-
-//build in cmd
-int builtInCmd(struct Command *cmd) {
-    int cmdNum = 0;
-    ArgvNode* cur = cmd->argvList.head;
-    while (cmdNum < cmd->argvNum) {
-        //EXIT
-        if (!strcmp(cur->argv[0], "exit")) {
-            //checks if can exit
-            if (!canExit(cmd)) {
-                fprintf(stderr, "Error: active job still running\n");
-                fprintf(stderr, "+ completed '%s' [1]\n", cmd->cmd);
-                return EXIT_FAIL;
-            }
-            //exits
-            fprintf(stderr, "Bye...\n");
-            fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
-            return EXIT_STATUS;
-        }
-        //PWD
-        if (!strcmp(cur->argv[0], "pwd")) {
-            char pwd[100];
-            fprintf(stdout, "%s\n", getcwd(pwd, sizeof(pwd)));
-            fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
-            return PWD_STATUS;
-        }
-        //CD
-        if (!strcmp(cur->argv[0], "cd")) {
-            int success = chdir(cmd->argv[1]); //changes the directory
-            if (success == -1) {
-                fprintf(stderr, "Error: cannot cd into directory\n");
-                fprintf(stderr, "+ completed '%s' [1]\n", cmd->cmd);
-            } else {
-                fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
-            }
-            return CD_STATUS;
-        }
-        //
-        cmdNum++;
-        cur = cur->next;
     }
     return 0;
 }
@@ -429,54 +432,7 @@ void forkNExec(struct Command *cmd, bool readingPrev, int prevPipeReadEnd, int c
     }
 }
 
-void allocateBackCmd(struct Command *cmd) {
-    //initial allocation
-    if (cmd->backCmd == NULL) {
-        cmd->backCmd = malloc(5 * sizeof(BackCmd));
-        if (cmd->backCmd == NULL) {
-            perror("malloc failed");
-            exit(EXIT_FAILURE);
-        }
-        cmd->backCmdCount = 5;
-        //initializes
-        for (int i = 0; i < 5; i++) {
-            cmd->backCmd[i].isActive = false;
-            cmd->backCmd[i].oldCmd[0] = '\0';
-        }
-    } else {
-        //resize
-        int newCount = cmd->backCmdCount + 5;
-        BackCmd *temp = realloc(cmd->backCmd, newCount * sizeof(BackCmd));
-        if (temp == NULL) {
-            perror("realloc failed");
-            free(cmd->backCmd);
-            exit(EXIT_FAILURE);
-        }
-        cmd->backCmd = temp;
-        //initializes
-        for (int i = cmd->backCmdCount; i < newCount; i++) {
-            cmd->backCmd[i].isActive = false;
-            cmd->backCmd[i].oldCmd[0] = '\0';
-        }
-        cmd->backCmdCount = newCount;
-    }
-}
-
-void freeBackCmd(struct Command *cmd) {
-    if (cmd->backCmd != NULL) {
-        free(cmd->backCmd);
-        cmd->backCmd = NULL;
-        cmd->backCmdCount = 0;
-    }
-}
-
 int createBackCmd(struct Command *cmd) {
-    //empty
-    if (cmd->backCmd == NULL) {
-        allocateBackCmd(cmd);
-        return 0;
-    }
-    
     int i = 0;
     //free - reusable - backCmd 
     for (; i < cmd->backCmdCount; i++) {
@@ -493,6 +449,35 @@ int createBackCmd(struct Command *cmd) {
     strcpy(cmd->backCmd[i].oldCmd, cmd->cmd);
     cmd->backCmd[i].isActive = true;
     return i;
+}
+
+void checkBackCmds(struct Command *cmd) {
+    for (int i = 0; i < cmd->backCmdCount; i++) {
+        if (cmd->backCmd[i].isActive) {
+            int childCount; bool oneSuccess = true;
+            //
+            for (childCount = 0; cmd->backCmd[i].backChildPids[childCount] != -1; childCount++) {
+                int status;
+                pid_t ret = waitpid(cmd->backCmd[i].backChildPids[childCount], &status, WNOHANG);
+                if (ret == cmd->backCmd[i].backChildPids[childCount]) {
+                    if (WIFEXITED(status)) {
+                        cmd->backCmd[i].backChildStatus[childCount] = WEXITSTATUS(status);
+                    }
+                } else {
+                    oneSuccess = false;
+                }
+            }
+            //
+            if (oneSuccess) {
+                fprintf(stderr, "+ completed '%s' ", cmd->backCmd[i].oldCmd);
+                for (int j = 0; j < childCount; j++) {
+                    fprintf(stderr, "[%d]", cmd->backCmd[i].backChildStatus[j]);
+                }
+                fprintf(stderr, "\n");
+                cmd->backCmd[i].isActive = false;
+            }
+        }
+    }
 }
 
 void waitForForks(struct Command *cmd) {
@@ -526,15 +511,55 @@ void waitForForks(struct Command *cmd) {
     fprintf(stderr, "\n");
 }
 
-void resetForNew(struct Command *cmd) {
-    cmd->argvNum = 0; 
-    fixNullEntries(cmd->argv);
-    cmd->isBackJob = false;
-    resetArgvList(&cmd->argvList);
-    //
-    dup2(cmd->terminalFd[0], STDIN_FILENO);
-    dup2(cmd->terminalFd[1], STDOUT_FILENO);
-} 
+bool canExit(struct Command *cmd) {
+    for (int i = 0; i < cmd->backCmdCount; i++) {
+        if (cmd->backCmd[i].isActive) return false; 
+    }
+    return true;
+}
+
+//build in cmd
+int builtInCmd(struct Command *cmd) {
+    int cmdNum = 0;
+    ArgvNode* cur = cmd->argvList.head;
+    while (cmdNum < cmd->argvNum) {
+        //EXIT
+        if (!strcmp(cur->argv[0], "exit")) {
+            //checks if can exit
+            if (!canExit(cmd)) {
+                fprintf(stderr, "Error: active job still running\n");
+                fprintf(stderr, "+ completed '%s' [1]\n", cmd->cmd);
+                return EXIT_FAIL;
+            }
+            //exits
+            fprintf(stderr, "Bye...\n");
+            fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
+            return EXIT_STATUS;
+        }
+        //PWD
+        if (!strcmp(cur->argv[0], "pwd")) {
+            char pwd[100];
+            fprintf(stdout, "%s\n", getcwd(pwd, sizeof(pwd)));
+            fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
+            return PWD_STATUS;
+        }
+        //CD
+        if (!strcmp(cur->argv[0], "cd")) {
+            int success = chdir(cmd->argv[1]); //changes the directory
+            if (success == -1) {
+                fprintf(stderr, "Error: cannot cd into directory\n");
+                fprintf(stderr, "+ completed '%s' [1]\n", cmd->cmd);
+            } else {
+                fprintf(stderr, "+ completed '%s' [0]\n", cmd->cmd);
+            }
+            return CD_STATUS;
+        }
+        //
+        cmdNum++;
+        cur = cur->next;
+    }
+    return 0;
+}
 
 void errorMsgs(int parseResult) {
     if(parseResult == MAX_ARG_SIZE_ERR) {
@@ -560,19 +585,34 @@ void errorMsgs(int parseResult) {
     }
 }
 
+void resetForNew(struct Command *cmd) {
+    cmd->argvNum = 0; 
+    fixNullEntries(cmd->argv);
+    cmd->isBackJob = false;
+    resetArgvList(&cmd->argvList);
+    //
+    dup2(cmd->terminalFd[0], STDIN_FILENO);
+    dup2(cmd->terminalFd[1], STDOUT_FILENO);
+}
+
+void initializeForNew(struct Command *cmd) {
+    allocateBackCmd(cmd);
+    allocateChildPid(cmd);
+    initializeList(&cmd->argvList);
+    cmd->argv = allocateMemArgv(NON_NULL_MAX, TOKEN_MAX);
+    cmd->terminalFd[0] = dup(STDIN_FILENO);
+    cmd->terminalFd[1] = dup(STDOUT_FILENO);
+}
+
 int main() {
+    //initialize 
     char *eof;
     struct Command command = {0};
-    //initialize 
-    allocateBackCmd(&command);
-    initializeList(&command.argvList);
-    command.argv = allocateMemArgv(NON_NULL_MAX, TOKEN_MAX);
-    command.terminalFd[0] = dup(STDIN_FILENO);
-    command.terminalFd[1] = dup(STDOUT_FILENO);
+    initializeForNew(&command);
 
     while (1) {
         //check for background jobs
-        // checkBackCmds(&command);
+        // checkBackCmds(&command); //!if you want to print &cmd print after cmd
 
         /* Print prompt */
         printf("sshell@ucd$ ");
@@ -641,10 +681,12 @@ int main() {
         //reset data
         resetForNew(&command);
     }
+    //free everything before ending prog
     freeMemArgv(command.argv, NON_NULL_MAX);
     freeArgvList(&command.argvList);
+    freeChildPid(&command);
     freeBackCmd(&command);
-    //
+    //close fds
     close(command.terminalFd[0]);
     close(command.terminalFd[1]);
     return EXIT_SUCCESS;
