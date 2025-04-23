@@ -163,7 +163,7 @@ int parseCommand(struct Command *cmd) {
             i++; 
             //store the input filename
             while(cmd->cmd[i] == ' ') i++; //skip leading WS after <
-            size_t start = i; //starting indec of input filename
+            size_t start = i; //starting index of input filename
             while(cmd->cmd[i] != '\0' && cmd->cmd[i] != ' ') i ++; //increment index until end of stirng
             size_t len = i - start; //len of input filename
             char* newInputFile = malloc(len + 1);
