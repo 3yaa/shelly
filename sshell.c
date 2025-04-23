@@ -516,7 +516,7 @@ void waitForForks(struct Command *cmd) {
     }
 
     //check for background finishes
-    // checkBackCmds(cmd); //!if you want to print &cmd print before cmd 
+    checkBackCmds(cmd); //!if you want to print &cmd print before cmd 
 
     //print completion code
     fprintf(stderr, "+ completed '%s' ", cmd->cmd);
@@ -572,7 +572,7 @@ int main() {
 
     while (1) {
         //check for background jobs
-        checkBackCmds(&command);
+        // checkBackCmds(&command);
 
         /* Print prompt */
         printf("sshell@ucd$ ");
