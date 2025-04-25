@@ -634,6 +634,10 @@ int main() {
         char *nl = strchr(command.cmd, '\n');
         if (nl) *nl = '\0';
 
+        // // check for if user just pressed enter (no cmd)
+        // if(strlen(command.cmd) == 0){
+        //     continue;
+        // }
 
         // check if user just put a bunch of whitespace
         int is_whitespace = 1;
