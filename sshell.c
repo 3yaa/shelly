@@ -296,7 +296,7 @@ int parseCommand(struct Command *cmd) {
             //cannot pipe after background
             if (cmd->isBackJob) return BACK_JOB_LOCATION_ERR;
             //cannot pipe after ouput
-            // if (outRedirecting) return OUTPUT_LOCATION_ERR; 
+            if (cmd->outputFile) return OUTPUT_LOCATION_ERR; 
             
             //ends word
             if (k > 0) {
@@ -624,11 +624,6 @@ int main() {
         /* Make EOF equate to exit */
         strncpy(command.cmd, "exit\n", CMDLINE_MAX);
 
-        // check for if user just pressed enter (no cmd)
-        if(strlen(command.cmd) == 0){
-            continue;
-        }
-        
         /* Print command line if stdin is not provided by terminal */
         if (!isatty(STDIN_FILENO)) {
             printf("%s", command.cmd);
