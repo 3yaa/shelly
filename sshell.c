@@ -623,6 +623,11 @@ int main() {
         if (!eof)
         /* Make EOF equate to exit */
         strncpy(command.cmd, "exit\n", CMDLINE_MAX);
+
+        // check for if user just pressed enter (no cmd)
+        if(strlen(command.cmd) == 0){
+            continue;
+        }
         
         /* Print command line if stdin is not provided by terminal */
         if (!isatty(STDIN_FILENO)) {
@@ -650,22 +655,13 @@ int main() {
         }
 
         if (is_whitespace) {
+            checkBackCmds(&command);
             continue; // prompt for input again
         }
 
         //parse input
         int parseResult = parseCommand(&command);
         command.currentArgv = command.argvList.head; //sets up list reading && index
-
-        // printf("*******\n");
-        // ArgvNode *cur = command.argvList.head;
-        // while(cur) {
-        //     for (int i = 0; cur->argv[i] != NULL; i++) {
-        //         printf("%s ", cur->argv[i]);
-        //     }
-        //     printf("\n");
-        //     cur = cur->next;
-        // }
 
         //command error handling
         if (parseResult < 0) {
